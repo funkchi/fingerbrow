@@ -109,6 +109,15 @@ select:disabled {
   min-height: 100vh;
 }
 
+.window-drag-zone {
+  height: 62px;
+  left: 0;
+  position: fixed;
+  right: 0;
+  top: 0;
+  z-index: 20;
+}
+
 .sidebar {
   background: #ffffff;
   border-right: 1px solid #e1e3e6;
@@ -369,6 +378,13 @@ nav {
   grid-template-columns: minmax(150px, 1fr) minmax(170px, 1fr) auto;
 }
 
+.mac-grid {
+  align-items: end;
+  display: grid;
+  gap: 12px;
+  grid-template-columns: minmax(220px, 1fr) auto;
+}
+
 .color-setting {
   display: grid;
   gap: 10px;
@@ -433,8 +449,8 @@ button.danger {
 .table-head,
 .profile-row {
   grid-template-columns:
-    minmax(120px, 0.86fr) minmax(64px, 0.34fr) minmax(180px, 0.98fr)
-    minmax(155px, 0.66fr) minmax(228px, 228px);
+    minmax(120px, 0.82fr) minmax(62px, 0.26fr) minmax(112px, 0.42fr)
+    minmax(170px, 0.84fr) minmax(150px, 0.58fr) minmax(228px, 228px);
 }
 
 .proxy-table-head,
@@ -462,6 +478,15 @@ button.danger {
   font-family: "SFMono-Regular", Consolas, monospace;
   font-size: 12px;
   line-height: 1.35;
+}
+
+.mac-cell {
+  color: #4b5563;
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .route-with-test {
@@ -590,7 +615,9 @@ button.danger {
   }
 
   .table-head > span:nth-child(2),
-  .profile-row > span:nth-child(2) {
+  .table-head > span:nth-child(3),
+  .profile-row > span:nth-child(2),
+  .profile-row > span:nth-child(3) {
     display: none;
   }
 

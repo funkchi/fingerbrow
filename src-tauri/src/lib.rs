@@ -68,6 +68,8 @@ struct Profile {
     language: Option<String>,
     timezone: Option<String>,
     profile_color: Option<String>,
+    spoof_mac_address: Option<String>,
+    randomize_mac_on_launch: bool,
     webrtc_policy: String,
     webrtc_disabled: bool,
     window_width: Option<i64>,
@@ -141,6 +143,8 @@ struct CreateProfileInput {
     language: Option<String>,
     timezone: Option<String>,
     profile_color: Option<String>,
+    spoof_mac_address: Option<String>,
+    randomize_mac_on_launch: Option<bool>,
     webrtc_policy: Option<String>,
     webrtc_disabled: Option<bool>,
     window_width: Option<i64>,
@@ -167,6 +171,8 @@ struct UpdateProfileInput {
     language: Option<String>,
     timezone: Option<String>,
     profile_color: Option<String>,
+    spoof_mac_address: Option<String>,
+    randomize_mac_on_launch: Option<bool>,
     webrtc_policy: Option<String>,
     webrtc_disabled: Option<bool>,
     window_width: Option<i64>,
@@ -248,6 +254,34 @@ fn normalize_optional_text(value: Option<String>) -> Option<String> {
     value
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
+}
+
+fn normalize_mac_address(value: Option<String>) -> Result<Option<String>, String> {
+    let Some(value) = normalize_optional_text(value) else {
+        return Ok(None);
+    };
+    let hex: String = value
+        .chars()
+        .filter(|character| *character != ':' && *character != '-' && *character != '.')
+        .collect();
+    if hex.len() != 12 || !hex.chars().all(|character| character.is_ascii_hexdigit()) {
+        return Err("Spoof MAC must contain 12 hex characters.".to_string());
+    }
+    let mut parts = Vec::with_capacity(6);
+    for index in (0..12).step_by(2) {
+        parts.push(hex[index..index + 2].to_ascii_uppercase());
+    }
+    Ok(Some(parts.join(":")))
+}
+
+fn random_spoof_mac_address() -> String {
+    let mut bytes = *Uuid::new_v4().as_bytes();
+    bytes[0] = (bytes[0] & 0b1111_1100) | 0b0000_0010;
+    bytes[..6]
+        .iter()
+        .map(|byte| format!("{byte:02X}"))
+        .collect::<Vec<_>>()
+        .join(":")
 }
 
 fn normalize_profile_color(value: Option<String>) -> Result<Option<String>, String> {
@@ -1109,6 +1143,8 @@ fn row_to_profile(row: &rusqlite::Row<'_>) -> rusqlite::Result<Profile> {
         language: row.get("language")?,
         timezone: row.get("timezone")?,
         profile_color: row.get("profile_color")?,
+        spoof_mac_address: row.get("spoof_mac_address")?,
+        randomize_mac_on_launch: row.get::<_, i64>("randomize_mac_on_launch")? != 0,
         webrtc_disabled: is_webrtc_direct_udp_restricted(&webrtc_policy),
         webrtc_policy,
         window_width: row.get("window_width")?,
@@ -1362,6 +1398,49 @@ fn run_migrations(conn: &Connection) -> Result<(), String> {
         .map_err(|err| err.to_string())?;
     }
 
+    let migration_exists: Option<i64> = conn
+        .query_row(
+            "SELECT version FROM schema_migrations WHERE version = ?1",
+            [6],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|err| err.to_string())?;
+
+    if migration_exists.is_none() {
+        let applied_at = now().to_rfc3339();
+        conn.execute_batch(
+            r#"
+            ALTER TABLE profiles ADD COLUMN spoof_mac_address TEXT;
+            ALTER TABLE profiles ADD COLUMN randomize_mac_on_launch INTEGER NOT NULL DEFAULT 0;
+            "#,
+        )
+        .map_err(|err| err.to_string())?;
+        let profile_ids = {
+            let mut stmt = conn
+                .prepare("SELECT id FROM profiles ORDER BY created_at ASC, name ASC")
+                .map_err(|err| err.to_string())?;
+            let ids = stmt
+                .query_map([], |row| row.get::<_, String>(0))
+                .map_err(|err| err.to_string())?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|err| err.to_string())?;
+            ids
+        };
+        for id in profile_ids {
+            conn.execute(
+                "UPDATE profiles SET spoof_mac_address = ?1 WHERE id = ?2",
+                params![random_spoof_mac_address(), id],
+            )
+            .map_err(|err| err.to_string())?;
+        }
+        conn.execute(
+            "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
+            params![6, "profile_spoof_mac_address", applied_at],
+        )
+        .map_err(|err| err.to_string())?;
+    }
+
     Ok(())
 }
 
@@ -1559,7 +1638,7 @@ fn list_profiles(state: State<'_, AppState>) -> Result<Vec<Profile>, String> {
             SELECT id, name, notes, tags_json, browser_binary_path, user_data_dir, proxy_id,
                    proxy_scheme, proxy_host, proxy_port, proxy_username,
                    proxy_password_secret_ref, user_agent, language, timezone, profile_color,
-                   webrtc_policy, webrtc_disabled,
+                   spoof_mac_address, randomize_mac_on_launch, webrtc_policy, webrtc_disabled,
                    window_width, window_height, window_x, window_y, launch_args_json,
                    startup_urls_json, created_at, updated_at, last_launched_at
             FROM profiles
@@ -1632,6 +1711,9 @@ fn create_profile(
     let language = normalize_optional_text(input.language);
     let timezone = normalize_optional_text(input.timezone);
     let profile_color = normalize_profile_color(input.profile_color)?;
+    let spoof_mac_address = normalize_mac_address(input.spoof_mac_address)?
+        .or_else(|| Some(random_spoof_mac_address()));
+    let randomize_mac_on_launch = input.randomize_mac_on_launch.unwrap_or(false);
     let webrtc_policy = normalize_webrtc_policy(input.webrtc_policy, input.webrtc_disabled)?;
     let window_width = normalize_dimension(input.window_width, "Window width")?;
     let window_height = normalize_dimension(input.window_height, "Window height")?;
@@ -1650,13 +1732,13 @@ fn create_profile(
         INSERT INTO profiles (
           id, name, notes, tags_json, browser_binary_path, user_data_dir, proxy_id,
           proxy_scheme, proxy_host, proxy_port, proxy_username, proxy_password_secret_ref,
-          user_agent, language, timezone, profile_color, webrtc_policy, webrtc_disabled, window_width,
-          window_height, window_x, window_y, launch_args_json, startup_urls_json, created_at,
-          updated_at
+          user_agent, language, timezone, profile_color, spoof_mac_address, randomize_mac_on_launch,
+          webrtc_policy, webrtc_disabled, window_width, window_height, window_x, window_y,
+          launch_args_json, startup_urls_json, created_at, updated_at
         )
         VALUES (
           ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
-          ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26
+          ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28
         )
         "#,
         params![
@@ -1676,6 +1758,8 @@ fn create_profile(
             language,
             timezone,
             profile_color,
+            spoof_mac_address,
+            randomize_mac_on_launch as i64,
             webrtc_policy,
             webrtc_disabled as i64,
             window_width,
@@ -1710,6 +1794,9 @@ fn update_profile(
     let language = normalize_optional_text(input.language);
     let timezone = normalize_optional_text(input.timezone);
     let profile_color = normalize_profile_color(input.profile_color)?;
+    let spoof_mac_address = normalize_mac_address(input.spoof_mac_address)?
+        .or_else(|| Some(random_spoof_mac_address()));
+    let randomize_mac_on_launch = input.randomize_mac_on_launch.unwrap_or(false);
     let webrtc_policy = normalize_webrtc_policy(input.webrtc_policy, input.webrtc_disabled)?;
     let window_width = normalize_dimension(input.window_width, "Window width")?;
     let window_height = normalize_dimension(input.window_height, "Window height")?;
@@ -1792,16 +1879,18 @@ fn update_profile(
                 language = ?12,
                 timezone = ?13,
                 profile_color = ?14,
-                webrtc_policy = ?15,
-                webrtc_disabled = ?16,
-                window_width = ?17,
-                window_height = ?18,
-                window_x = ?19,
-                window_y = ?20,
-                launch_args_json = ?21,
-                startup_urls_json = ?22,
-                updated_at = ?23
-            WHERE id = ?24
+                spoof_mac_address = ?15,
+                randomize_mac_on_launch = ?16,
+                webrtc_policy = ?17,
+                webrtc_disabled = ?18,
+                window_width = ?19,
+                window_height = ?20,
+                window_x = ?21,
+                window_y = ?22,
+                launch_args_json = ?23,
+                startup_urls_json = ?24,
+                updated_at = ?25
+            WHERE id = ?26
             "#,
             params![
                 name,
@@ -1818,6 +1907,8 @@ fn update_profile(
                 language,
                 timezone,
                 profile_color,
+                spoof_mac_address,
+                randomize_mac_on_launch as i64,
                 webrtc_policy,
                 webrtc_disabled as i64,
                 window_width,
@@ -1920,6 +2011,17 @@ fn launch_profile(id: String, state: State<'_, AppState>) -> Result<LaunchProfil
     }
 
     let relay_port = apply_authenticated_proxy_relay(&mut profile, &id, state.clone())?;
+    if profile.randomize_mac_on_launch {
+        let spoof_mac_address = random_spoof_mac_address();
+        profile.spoof_mac_address = Some(spoof_mac_address.clone());
+        let updated_at = now();
+        let conn = state.db.lock().map_err(|err| err.to_string())?;
+        conn.execute(
+            "UPDATE profiles SET spoof_mac_address = ?1, updated_at = ?2 WHERE id = ?3",
+            params![spoof_mac_address, updated_at.to_rfc3339(), id],
+        )
+        .map_err(|err| err.to_string())?;
+    }
     ensure_chrome_profile_preferences(&profile)?;
 
     let args = build_launch_args(&profile);
@@ -2022,8 +2124,9 @@ fn get_profile(id: &str, state: State<'_, AppState>) -> Result<Profile, String> 
         r#"
         SELECT id, name, notes, tags_json, browser_binary_path, user_data_dir, proxy_id,
                proxy_scheme, proxy_host, proxy_port, proxy_username, proxy_password_secret_ref,
-               user_agent, language, timezone, profile_color, webrtc_policy, webrtc_disabled, window_width,
-               window_height, window_x, window_y, launch_args_json, startup_urls_json, created_at, updated_at,
+               user_agent, language, timezone, profile_color, spoof_mac_address,
+               randomize_mac_on_launch, webrtc_policy, webrtc_disabled, window_width, window_height,
+               window_x, window_y, launch_args_json, startup_urls_json, created_at, updated_at,
                last_launched_at
         FROM profiles
         WHERE id = ?1
@@ -2087,6 +2190,8 @@ mod tests {
             language: None,
             timezone: None,
             profile_color: None,
+            spoof_mac_address: None,
+            randomize_mac_on_launch: false,
             webrtc_policy: "default".to_string(),
             webrtc_disabled: false,
             window_width: None,
@@ -2110,6 +2215,24 @@ mod tests {
     fn chrome_argb_color_matches_chrome_user_color_format() {
         assert_eq!(chrome_argb_color(0, 177, 255), -16_731_649);
         assert_eq!(chrome_argb_color(5, 150, 105), -16_411_031);
+    }
+
+    #[test]
+    fn normalizes_spoof_mac_address() {
+        assert_eq!(
+            normalize_mac_address(Some("aa-bb-cc-dd-ee-ff".to_string())).unwrap(),
+            Some("AA:BB:CC:DD:EE:FF".to_string())
+        );
+        assert!(normalize_mac_address(Some("not-a-mac".to_string())).is_err());
+    }
+
+    #[test]
+    fn generated_spoof_mac_is_local_unicast() {
+        let mac = random_spoof_mac_address();
+        let normalized = normalize_mac_address(Some(mac)).unwrap().unwrap();
+        let first = u8::from_str_radix(&normalized[0..2], 16).unwrap();
+        assert_eq!(first & 0b0000_0010, 0b0000_0010);
+        assert_eq!(first & 0b0000_0001, 0);
     }
 
     #[test]
