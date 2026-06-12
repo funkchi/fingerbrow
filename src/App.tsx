@@ -1,6 +1,5 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   Activity,
   Database,
@@ -339,17 +338,6 @@ function App() {
   const [launchMessage, setLaunchMessage] = useState<string | null>(null);
   const [proxyTestMessage, setProxyTestMessage] = useState<string | null>(null);
 
-  async function startWindowDrag(event: React.MouseEvent<HTMLElement>) {
-    if (event.button !== 0) {
-      return;
-    }
-    try {
-      await getCurrentWindow().startDragging();
-    } catch {
-      // Browser preview cannot drag a native Tauri window.
-    }
-  }
-
   async function load() {
     try {
       const [appPaths, browserRows, proxyRows, profileRows] = await Promise.all([
@@ -676,14 +664,11 @@ function App() {
 
   return (
     <main className="app-shell">
+      <div className="window-drag-zone" data-tauri-drag-region="" />
       <aside className="sidebar">
-        <div
-          className="sidebar-brand drag-surface"
-          data-tauri-drag-region=""
-          onMouseDown={startWindowDrag}
-        >
+        <div className="sidebar-brand">
           <strong>FingerBrow</strong>
-          <span>Drag here</span>
+          <span>Profile Manager</span>
         </div>
         <nav aria-label="Primary">
           <button
@@ -714,14 +699,6 @@ function App() {
       </aside>
 
       <section className="workspace">
-        <div
-          className="drag-bar"
-          data-tauri-drag-region=""
-          onMouseDown={startWindowDrag}
-          role="presentation"
-        >
-          <span>Drag window</span>
-        </div>
         <header className="toolbar">
           <div>
             <h2>
