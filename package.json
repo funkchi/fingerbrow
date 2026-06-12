@@ -16,7 +16,7 @@
     "desktop:build": "tauri build",
     "desktop:build:linux": "tauri build --bundles appimage,deb",
     "desktop:build:mac": "tauri build --bundles app,dmg",
-    "docker:linux-build": "docker compose run --rm linux-builder",
+    "docker:linux-build": "docker compose run --rm --build linux-builder",
     "lint": "eslint .",
     "format": "prettier --write .",
     "format:check": "prettier --check .",

@@ -7,6 +7,9 @@ services:
     volumes:
       - ./release:/release
     command: >
-      sh -lc "pnpm desktop:build:linux &&
+      sh -c "pnpm desktop:build:linux &&
       mkdir -p /release &&
-      cp -R src-tauri/target/release/bundle/. /release/"
+      find /release -mindepth 1 -maxdepth 1 -exec rm -rf {} + &&
+      mkdir -p /release/appimage /release/deb &&
+      cp src-tauri/target/release/bundle/appimage/*.AppImage /release/appimage/ &&
+      cp src-tauri/target/release/bundle/deb/*.deb /release/deb/"

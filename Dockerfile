@@ -1,8 +1,6 @@
 FROM rust:1-bookworm
 
 ENV DEBIAN_FRONTEND=noninteractive
-ENV PNPM_HOME=/root/.local/share/pnpm
-ENV PATH=$PNPM_HOME:$PATH
 
 RUN apt-get update \
   && apt-get install -y --no-install-recommends \
@@ -22,6 +20,13 @@ RUN apt-get update \
   && apt-get install -y --no-install-recommends nodejs \
   && corepack enable \
   && rm -rf /var/lib/apt/lists/*
+
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends xdg-utils \
+  && rm -rf /var/lib/apt/lists/*
+
+ENV PNPM_HOME=/root/.local/share/pnpm
+ENV PATH="$PNPM_HOME:/usr/local/cargo/bin:$PATH"
 
 WORKDIR /app
 
