@@ -1,0 +1,12 @@
+.git
+.github
+node_modules
+dist
+dist-ssr
+src-tauri/target
+src-tauri/gen
+release
+*.log
+.DS_Store
+.env
+.env.*

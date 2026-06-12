@@ -1,0 +1,12 @@
+name: fingerbrow
+
+services:
+  linux-builder:
+    build:
+      context: .
+    volumes:
+      - ./release:/release
+    command: >
+      sh -lc "pnpm desktop:build:linux &&
+      mkdir -p /release &&
+      cp -R src-tauri/target/release/bundle/. /release/"
