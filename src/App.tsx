@@ -40,8 +40,6 @@ type Profile = {
   language: string | null;
   timezone: string | null;
   profile_color: string | null;
-  spoof_mac_address: string | null;
-  randomize_mac_on_launch: boolean;
   webrtc_policy: string;
   webrtc_disabled: boolean;
   window_width: number | null;
@@ -114,8 +112,6 @@ type ProfileForm = {
   language: string;
   timezone: string;
   profileColor: string;
-  spoofMacAddress: string;
-  randomizeMacOnLaunch: boolean;
   webrtcPolicy: string;
   windowWidth: string;
   windowHeight: string;
@@ -161,8 +157,6 @@ const emptyForm: ProfileForm = {
   language: "",
   timezone: "",
   profileColor: "#2563EB",
-  spoofMacAddress: "",
-  randomizeMacOnLaunch: false,
   webrtcPolicy: "proxy_only",
   windowWidth: "1280",
   windowHeight: "900",
@@ -228,14 +222,6 @@ const profileColorPalette = [
 
 function randomProfileColor() {
   return profileColorPalette[Math.floor(Math.random() * profileColorPalette.length)];
-}
-
-function randomSpoofMacAddress() {
-  const bytes = crypto.getRandomValues(new Uint8Array(6));
-  bytes[0] = (bytes[0] & 0xfc) | 0x02;
-  return Array.from(bytes)
-    .map((byte) => byte.toString(16).padStart(2, "0").toUpperCase())
-    .join(":");
 }
 
 function formatDeviceTime(value: string | null) {
@@ -412,11 +398,7 @@ function App() {
   }
 
   function openNewProfile() {
-    setForm({
-      ...emptyForm,
-      profileColor: randomProfileColor(),
-      spoofMacAddress: randomSpoofMacAddress(),
-    });
+    setForm({ ...emptyForm, profileColor: randomProfileColor() });
     setIsEditorOpen(true);
   }
 
@@ -442,8 +424,6 @@ function App() {
       language: profile.language ?? "",
       timezone: profile.timezone ?? "",
       profileColor: profile.profile_color ?? randomProfileColor(),
-      spoofMacAddress: profile.spoof_mac_address ?? randomSpoofMacAddress(),
-      randomizeMacOnLaunch: profile.randomize_mac_on_launch,
       webrtcPolicy: profile.webrtc_policy || (profile.webrtc_disabled ? "proxy_only" : "default"),
       windowWidth: profile.window_width?.toString() ?? "1280",
       windowHeight: profile.window_height?.toString() ?? "900",
@@ -528,8 +508,6 @@ function App() {
       language: form.language.trim() || null,
       timezone: form.timezone.trim() || null,
       profile_color: form.profileColor.trim() || null,
-      spoof_mac_address: form.spoofMacAddress.trim() || null,
-      randomize_mac_on_launch: form.randomizeMacOnLaunch,
       webrtc_policy: form.webrtcPolicy,
       webrtc_disabled: form.webrtcPolicy !== "default",
       window_width: optionalNumber(form.windowWidth),
@@ -664,7 +642,6 @@ function App() {
 
   return (
     <main className="app-shell">
-      <div className="window-drag-zone" data-tauri-drag-region="" />
       <aside className="sidebar">
         <div className="sidebar-brand">
           <strong>FingerBrow</strong>
@@ -1050,33 +1027,6 @@ function App() {
                   <option value="default">Chrome default</option>
                 </select>
               </label>
-              <div className="mac-grid">
-                <label>
-                  <span>Spoof MAC</span>
-                  <input
-                    value={form.spoofMacAddress}
-                    onChange={(event) =>
-                      setForm({ ...form, spoofMacAddress: event.currentTarget.value })
-                    }
-                  />
-                </label>
-                <button
-                  type="button"
-                  onClick={() => setForm({ ...form, spoofMacAddress: randomSpoofMacAddress() })}
-                >
-                  Random
-                </button>
-              </div>
-              <label className="checkbox-row">
-                <input
-                  type="checkbox"
-                  checked={form.randomizeMacOnLaunch}
-                  onChange={(event) =>
-                    setForm({ ...form, randomizeMacOnLaunch: event.currentTarget.checked })
-                  }
-                />
-                <span>Randomize spoof MAC on launch</span>
-              </label>
             </fieldset>
             <label>
               <span>Launch Args</span>
@@ -1115,7 +1065,6 @@ function App() {
             <div className="table-row table-head">
               <span>Name</span>
               <span>Tags</span>
-              <span>MAC</span>
               <span>Route</span>
               <span>Last launched</span>
               <span>Actions</span>
@@ -1141,9 +1090,6 @@ function App() {
                       {profile.running ? <span className="running-badge">Open</span> : null}
                     </button>
                     <span>{profile.tags.join(", ") || "None"}</span>
-                    <span className="mac-cell" title={profile.spoof_mac_address ?? ""}>
-                      {profile.spoof_mac_address ?? "Auto"}
-                    </span>
                     <span className="route-cell route-with-test">
                       <span className="route-text" title={route}>
                         {route}
