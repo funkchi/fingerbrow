@@ -1,6 +1,18 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import {
+  Activity,
+  Database,
+  FolderOpen,
+  Globe2,
+  HardDrive,
+  Play,
+  Plus,
+  Settings,
+  TestTube2,
+  X,
+} from "lucide-react";
 import "./App.css";
 
 type AppPaths = {
@@ -331,14 +343,6 @@ function App() {
     if (event.button !== 0) {
       return;
     }
-    const target = event.target as HTMLElement;
-    if (
-      target.closest(
-        "button, input, select, textarea, label, form, .profile-table, .system-panel, .notice",
-      )
-    ) {
-      return;
-    }
     try {
       await getCurrentWindow().startDragging();
     } catch {
@@ -371,6 +375,13 @@ function App() {
   function splitLines(value: string) {
     return value
       .split("\n")
+      .map((item) => item.trim())
+      .filter(Boolean);
+  }
+
+  function splitTags(value: string) {
+    return value
+      .split(",")
       .map((item) => item.trim())
       .filter(Boolean);
   }
@@ -426,7 +437,7 @@ function App() {
       id: profile.id,
       name: profile.name,
       notes: profile.notes,
-      tags: "",
+      tags: profile.tags.join(", "),
       browserBinaryPath: profile.browser_binary_path ?? "",
       proxyId: profile.proxy_id ?? "",
       proxyEnabled: Boolean(profile.proxy_scheme && profile.proxy_host && profile.proxy_port),
@@ -517,7 +528,7 @@ function App() {
     const payload = {
       name: form.name,
       notes: form.notes,
-      tags: [],
+      tags: splitTags(form.tags),
       browser_binary_path: form.browserBinaryPath.trim() || null,
       proxy_id: form.proxyId || null,
       proxy_scheme: form.proxyEnabled ? form.proxyScheme : null,
@@ -665,10 +676,14 @@ function App() {
 
   return (
     <main className="app-shell">
-      <aside className="sidebar" data-tauri-drag-region="" onMouseDown={startWindowDrag}>
-        <div className="sidebar-brand">
+      <aside className="sidebar">
+        <div
+          className="sidebar-brand drag-surface"
+          data-tauri-drag-region=""
+          onMouseDown={startWindowDrag}
+        >
           <strong>FingerBrow</strong>
-          <span>local profiles</span>
+          <span>Drag here</span>
         </div>
         <nav aria-label="Primary">
           <button
@@ -676,6 +691,7 @@ function App() {
             type="button"
             onClick={() => setActiveTab("profiles")}
           >
+            <Activity size={18} strokeWidth={1.8} />
             Profiles
           </button>
           <button
@@ -683,6 +699,7 @@ function App() {
             type="button"
             onClick={() => setActiveTab("proxies")}
           >
+            <Globe2 size={18} strokeWidth={1.8} />
             Proxies
           </button>
           <button
@@ -690,13 +707,22 @@ function App() {
             type="button"
             onClick={() => setActiveTab("settings")}
           >
+            <Settings size={18} strokeWidth={1.8} />
             Settings
           </button>
         </nav>
       </aside>
 
       <section className="workspace">
-        <header className="toolbar" data-tauri-drag-region="" onMouseDown={startWindowDrag}>
+        <div
+          className="drag-bar"
+          data-tauri-drag-region=""
+          onMouseDown={startWindowDrag}
+          role="presentation"
+        >
+          <span>Drag window</span>
+        </div>
+        <header className="toolbar">
           <div>
             <h2>
               {activeTab === "proxies"
@@ -715,11 +741,13 @@ function App() {
           </div>
           {activeTab === "profiles" ? (
             <button className="primary-button" type="button" onClick={openNewProfile}>
+              <Plus size={17} strokeWidth={2} />
               New Profile
             </button>
           ) : null}
           {activeTab === "proxies" ? (
             <button className="primary-button" type="button" onClick={openNewProxyProfile}>
+              <Plus size={17} strokeWidth={2} />
               New Proxy
             </button>
           ) : null}
@@ -732,15 +760,24 @@ function App() {
         {activeTab !== "proxies" ? (
           <section className="system-panel" aria-label="Local storage paths">
             <div>
-              <span>App data</span>
+              <span>
+                <FolderOpen size={15} strokeWidth={1.8} />
+                App data
+              </span>
               <strong>{paths?.app_data_dir ?? "Loading..."}</strong>
             </div>
             <div>
-              <span>Database</span>
+              <span>
+                <Database size={15} strokeWidth={1.8} />
+                Database
+              </span>
               <strong>{paths?.database_path ?? "Loading..."}</strong>
             </div>
             <div>
-              <span>Detected browser</span>
+              <span>
+                <HardDrive size={15} strokeWidth={1.8} />
+                Detected browser
+              </span>
               <strong>
                 {detectedBrowser?.binary_path ?? "No Chrome/Chromium binary detected"}
               </strong>
@@ -763,6 +800,14 @@ function App() {
                 required
                 value={form.name}
                 onChange={(event) => setForm({ ...form, name: event.currentTarget.value })}
+              />
+            </label>
+            <label>
+              <span>Tags</span>
+              <input
+                placeholder="work, qa, banking"
+                value={form.tags}
+                onChange={(event) => setForm({ ...form, tags: event.currentTarget.value })}
               />
             </label>
             <div className="color-setting">
@@ -1092,6 +1137,8 @@ function App() {
           <section className="profile-table" aria-label="Profiles">
             <div className="table-row table-head">
               <span>Name</span>
+              <span>Tags</span>
+              <span>MAC</span>
               <span>Route</span>
               <span>Last launched</span>
               <span>Actions</span>
@@ -1116,12 +1163,16 @@ function App() {
                       <span>{profile.name}</span>
                       {profile.running ? <span className="running-badge">Open</span> : null}
                     </button>
+                    <span>{profile.tags.join(", ") || "None"}</span>
+                    <span className="mac-cell" title={profile.spoof_mac_address ?? ""}>
+                      {profile.spoof_mac_address ?? "Auto"}
+                    </span>
                     <span className="route-cell route-with-test">
-                      <span className="route-wrap">
-                        <span className="route-text">{route}</span>
-                        <span className="route-tooltip">{route}</span>
+                      <span className="route-text" title={route}>
+                        {route}
                       </span>
                       <button type="button" onClick={() => testProfileProxy(profile.id)}>
+                        <TestTube2 size={15} strokeWidth={1.9} />
                         Test
                       </button>
                     </span>
@@ -1130,9 +1181,11 @@ function App() {
                     </span>
                     <span className="action-cell">
                       <button type="button" onClick={() => launchProfile(profile.id)}>
+                        <Play size={15} strokeWidth={1.9} />
                         Launch
                       </button>
                       <button type="button" onClick={() => closeProfile(profile.id)}>
+                        <X size={15} strokeWidth={1.9} />
                         Close
                       </button>
                     </span>
