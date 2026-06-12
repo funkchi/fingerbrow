@@ -173,12 +173,21 @@ pnpm build
 cd src-tauri && cargo test
 ```
 
+## Continuous Builds
+
+The repository includes a GitHub Actions workflow at `.github/workflows/build.yml` for:
+
+- formatting, linting, frontend build, and Rust tests
+- macOS `.app` and `.dmg` packaging
+- Linux AppImage and Debian packaging
+
 ## Repository Layout
 
 ```text
 src/                 React UI
 src-tauri/           Tauri/Rust backend
 src-tauri/icons/     App bundle icons
+.github/workflows/   CI checks and macOS/Linux package builds
 Dockerfile           Linux desktop package builder
 docker-compose.yml   One-command Docker build wrapper
 release/             Docker build output, ignored by git

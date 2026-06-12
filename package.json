@@ -5,6 +5,10 @@
   "description": "Open-source, self-hosted browser fingerprint profile manager.",
   "license": "MIT",
   "type": "module",
+  "packageManager": "pnpm@10.26.0",
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
