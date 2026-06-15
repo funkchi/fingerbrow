@@ -665,15 +665,22 @@ function App() {
   }
 
   const detectedBrowser = browsers.find((browser) => browser.exists);
+  const activeTitle =
+    activeTab === "proxies" ? "Proxies" : activeTab === "settings" ? "Settings" : "Profiles";
+  const activeSubtitle =
+    activeTab === "proxies"
+      ? `${proxyProfiles.length} proxy profiles`
+      : activeTab === "settings"
+        ? "Local app paths"
+        : `${profiles.length} local profiles`;
 
   return (
     <main className="app-shell">
-      <aside className="sidebar">
-        <div className="sidebar-brand">
+      <header className="app-topbar" data-tauri-drag-region>
+        <div className="app-brand" data-tauri-drag-region>
           <strong>FingerBrow</strong>
-          <span>Profile Manager</span>
         </div>
-        <nav aria-label="Primary">
+        <nav className="top-nav" aria-label="Primary">
           <button
             className={`nav-item ${activeTab === "profiles" ? "active" : ""}`}
             type="button"
@@ -699,26 +706,7 @@ function App() {
             Settings
           </button>
         </nav>
-      </aside>
-
-      <section className="workspace">
-        <header className="toolbar">
-          <div>
-            <h2>
-              {activeTab === "proxies"
-                ? "Proxies"
-                : activeTab === "settings"
-                  ? "Settings"
-                  : "Profiles"}
-            </h2>
-            <p>
-              {activeTab === "proxies"
-                ? `${proxyProfiles.length} proxy profiles`
-                : activeTab === "settings"
-                  ? "Local app paths"
-                  : `${profiles.length} local profiles`}
-            </p>
-          </div>
+        <div className="top-actions">
           {activeTab === "profiles" ? (
             <button className="primary-button" type="button" onClick={openNewProfile}>
               <Plus size={17} strokeWidth={2} />
@@ -731,6 +719,15 @@ function App() {
               New Proxy
             </button>
           ) : null}
+        </div>
+      </header>
+
+      <section className="workspace">
+        <header className="toolbar">
+          <div>
+            <h2>{activeTitle}</h2>
+            <p>{activeSubtitle}</p>
+          </div>
         </header>
 
         {error ? <div className="notice error">{error}</div> : null}
