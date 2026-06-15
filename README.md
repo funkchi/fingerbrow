@@ -7,6 +7,7 @@ It is designed for people who want a local desktop tool for building and testing
 ## What It Does
 
 - Creates isolated Chrome user-data directories per profile.
+- Can install an app-managed Chrome for Testing binary under FingerBrow app data.
 - Launches profiles with per-profile proxy settings.
 - Supports authenticated SOCKS/HTTP proxies through a local relay.
 - Stores proxy profile passwords in the host keychain when possible.
@@ -36,6 +37,8 @@ For local development:
 - pnpm 10+
 - Rust stable
 - Chrome, Chromium, or a compatible Chromium binary
+
+FingerBrow can also install a managed Chrome for Testing binary from the Settings tab. When installed, that binary is preferred by default so profiles are not launched through your normal `/Applications/Google Chrome.app`.
 
 For Linux desktop builds, install the Tauri/WebKit dependencies listed in the Tauri Linux prerequisites, or use the Docker builder below.
 
@@ -149,6 +152,7 @@ For authenticated SOCKS proxies, FingerBrow starts a local relay and launches Ch
 Profile settings currently include:
 
 - Browser binary path
+- App-managed Chrome for Testing install/status
 - Saved proxy or manual proxy
 - Browser/OS user-agent preset
 - Language

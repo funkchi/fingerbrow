@@ -61,6 +61,13 @@ type BrowserCandidate = {
   exists: boolean;
 };
 
+type ManagedBrowserStatus = {
+  installed: boolean;
+  install_dir: string;
+  binary_path: string | null;
+  message: string;
+};
+
 type ProxyProfile = {
   id: string;
   name: string;
@@ -314,6 +321,7 @@ function App() {
   const [activeTab, setActiveTab] = useState<ActiveTab>("profiles");
   const [paths, setPaths] = useState<AppPaths | null>(null);
   const [browsers, setBrowsers] = useState<BrowserCandidate[]>([]);
+  const [managedBrowser, setManagedBrowser] = useState<ManagedBrowserStatus | null>(null);
   const [proxyProfiles, setProxyProfiles] = useState<ProxyProfile[]>([]);
   const [profiles, setProfiles] = useState<Profile[]>([]);
   const [form, setForm] = useState<ProfileForm>(emptyForm);
@@ -326,14 +334,17 @@ function App() {
 
   async function load() {
     try {
-      const [appPaths, browserRows, proxyRows, profileRows] = await Promise.all([
-        invoke<AppPaths>("get_app_paths"),
-        invoke<BrowserCandidate[]>("detect_browsers"),
-        invoke<ProxyProfile[]>("list_proxy_profiles"),
-        invoke<Profile[]>("list_profiles"),
-      ]);
+      const [appPaths, browserRows, managedBrowserStatus, proxyRows, profileRows] =
+        await Promise.all([
+          invoke<AppPaths>("get_app_paths"),
+          invoke<BrowserCandidate[]>("detect_browsers"),
+          invoke<ManagedBrowserStatus>("get_managed_browser_status"),
+          invoke<ProxyProfile[]>("list_proxy_profiles"),
+          invoke<Profile[]>("list_profiles"),
+        ]);
       setPaths(appPaths);
       setBrowsers(browserRows);
+      setManagedBrowser(managedBrowserStatus);
       setProxyProfiles(proxyRows);
       setProfiles(profileRows);
       setError(null);
@@ -638,6 +649,21 @@ function App() {
     }
   }
 
+  async function installManagedBrowser() {
+    try {
+      setLaunchMessage("Installing isolated Chrome for Testing...");
+      setProxyTestMessage(null);
+      setError(null);
+      const status = await invoke<ManagedBrowserStatus>("install_managed_browser");
+      setManagedBrowser(status);
+      setLaunchMessage(status.message);
+      await load();
+    } catch (err) {
+      setLaunchMessage(null);
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  }
+
   const detectedBrowser = browsers.find((browser) => browser.exists);
 
   return (
@@ -735,6 +761,31 @@ function App() {
               <strong>
                 {detectedBrowser?.binary_path ?? "No Chrome/Chromium binary detected"}
               </strong>
+            </div>
+          </section>
+        ) : null}
+
+        {activeTab === "settings" ? (
+          <section className="editor-panel" aria-label="Managed browser">
+            <header>
+              <h3>Isolated Browser</h3>
+              <button type="button" onClick={installManagedBrowser}>
+                {managedBrowser?.installed ? "Update Isolated Chrome" : "Install Isolated Chrome"}
+              </button>
+            </header>
+            <div className="system-panel single-panel">
+              <div>
+                <span>Status</span>
+                <strong>{managedBrowser?.message ?? "Loading..."}</strong>
+              </div>
+              <div>
+                <span>Binary</span>
+                <strong>{managedBrowser?.binary_path ?? "Not installed"}</strong>
+              </div>
+              <div>
+                <span>Install dir</span>
+                <strong>{managedBrowser?.install_dir ?? "Loading..."}</strong>
+              </div>
             </div>
           </section>
         ) : null}

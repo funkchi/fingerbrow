@@ -262,6 +262,10 @@ nav {
   padding: 0;
 }
 
+.system-panel.single-panel {
+  grid-template-columns: 1fr;
+}
+
 .system-panel div {
   display: grid;
   gap: 5px;

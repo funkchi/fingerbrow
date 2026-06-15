@@ -23,6 +23,7 @@ struct AppPaths {
     credentials_path: PathBuf,
     profiles_dir: PathBuf,
     backups_dir: PathBuf,
+    browsers_dir: PathBuf,
 }
 
 impl AppPaths {
@@ -33,6 +34,7 @@ impl AppPaths {
             credentials_path: app_data_dir.join("credentials.enc"),
             profiles_dir: app_data_dir.join("profiles"),
             backups_dir: app_data_dir.join("backups"),
+            browsers_dir: app_data_dir.join("browsers"),
             app_data_dir,
         }
     }
@@ -41,6 +43,7 @@ impl AppPaths {
         fs::create_dir_all(&self.app_data_dir).map_err(|err| err.to_string())?;
         fs::create_dir_all(&self.profiles_dir).map_err(|err| err.to_string())?;
         fs::create_dir_all(&self.backups_dir).map_err(|err| err.to_string())?;
+        fs::create_dir_all(&self.browsers_dir).map_err(|err| err.to_string())?;
         Ok(())
     }
 }
@@ -88,6 +91,14 @@ struct BrowserCandidate {
     app_path: String,
     binary_path: String,
     exists: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct ManagedBrowserStatus {
+    installed: bool,
+    install_dir: String,
+    binary_path: Option<String>,
+    message: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -896,31 +907,218 @@ fn apply_authenticated_proxy_relay(
     Ok(Some(relay_port))
 }
 
-fn browser_candidates() -> Vec<BrowserCandidate> {
-    [
-        (
-            "Google Chrome",
-            "/Applications/Google Chrome.app",
-            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-        ),
-        (
-            "Chromium",
-            "/Applications/Chromium.app",
-            "/Applications/Chromium.app/Contents/MacOS/Chromium",
-        ),
-    ]
-    .into_iter()
-    .map(|(name, app_path, binary_path)| BrowserCandidate {
-        name: name.to_string(),
-        app_path: app_path.to_string(),
-        binary_path: binary_path.to_string(),
-        exists: Path::new(binary_path).exists(),
-    })
-    .collect()
+fn chrome_for_testing_platform() -> Result<&'static str, String> {
+    match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("macos", "aarch64") => Ok("mac-arm64"),
+        ("macos", "x86_64") => Ok("mac-x64"),
+        ("linux", "x86_64") => Ok("linux64"),
+        (os, arch) => Err(format!(
+            "Managed Chrome is not wired for this platform yet: {os}/{arch}."
+        )),
+    }
 }
 
-fn detect_default_browser_binary() -> Option<String> {
-    browser_candidates()
+fn managed_browser_root(paths: &AppPaths) -> PathBuf {
+    paths.browsers_dir.join("chrome-for-testing")
+}
+
+fn managed_browser_install_dir(paths: &AppPaths) -> Result<PathBuf, String> {
+    Ok(managed_browser_root(paths).join(format!("chrome-{}", chrome_for_testing_platform()?)))
+}
+
+fn managed_browser_binary_path(paths: &AppPaths) -> Result<PathBuf, String> {
+    let install_dir = managed_browser_install_dir(paths)?;
+    match std::env::consts::OS {
+        "macos" => Ok(install_dir
+            .join("Google Chrome for Testing.app")
+            .join("Contents")
+            .join("MacOS")
+            .join("Google Chrome for Testing")),
+        "linux" => Ok(install_dir.join("chrome")),
+        os => Err(format!(
+            "Managed Chrome is not wired for this OS yet: {os}."
+        )),
+    }
+}
+
+fn managed_browser_status(paths: &AppPaths) -> ManagedBrowserStatus {
+    match managed_browser_binary_path(paths) {
+        Ok(binary_path) => {
+            let installed = binary_path.exists();
+            ManagedBrowserStatus {
+                installed,
+                install_dir: managed_browser_root(paths).to_string_lossy().to_string(),
+                binary_path: installed.then(|| binary_path.to_string_lossy().to_string()),
+                message: if installed {
+                    "Managed Chrome for Testing is installed and will be used by default."
+                        .to_string()
+                } else {
+                    "Managed Chrome for Testing is not installed.".to_string()
+                },
+            }
+        }
+        Err(message) => ManagedBrowserStatus {
+            installed: false,
+            install_dir: managed_browser_root(paths).to_string_lossy().to_string(),
+            binary_path: None,
+            message,
+        },
+    }
+}
+
+fn chrome_for_testing_download_url(platform: &str) -> Result<String, String> {
+    let output = Command::new("curl")
+        .args([
+            "-fsSL",
+            "https://googlechromelabs.github.io/chrome-for-testing/last-known-good-versions-with-downloads.json",
+        ])
+        .output()
+        .map_err(|err| format!("Failed to run curl: {err}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "Failed to fetch Chrome for Testing metadata: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    let value: Value = serde_json::from_slice(&output.stdout).map_err(|err| err.to_string())?;
+    value["channels"]["Stable"]["downloads"]["chrome"]
+        .as_array()
+        .and_then(|downloads| {
+            downloads.iter().find_map(|download| {
+                (download["platform"].as_str()? == platform)
+                    .then(|| download["url"].as_str().map(str::to_string))
+                    .flatten()
+            })
+        })
+        .ok_or_else(|| format!("Chrome for Testing download URL not found for {platform}."))
+}
+
+fn run_command(mut command: Command, action: &str) -> Result<(), String> {
+    let output = command
+        .output()
+        .map_err(|err| format!("Failed to {action}: {err}"))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "Failed to {action}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ))
+    }
+}
+
+fn install_managed_browser_inner(paths: &AppPaths) -> Result<ManagedBrowserStatus, String> {
+    let platform = chrome_for_testing_platform()?;
+    let url = chrome_for_testing_download_url(platform)?;
+    let root = managed_browser_root(paths);
+    let extract_dir = root.join("extracting");
+    let install_dir = managed_browser_install_dir(paths)?;
+    let zip_path = root.join("chrome-for-testing.zip");
+
+    fs::create_dir_all(&root).map_err(|err| err.to_string())?;
+    if extract_dir.exists() {
+        fs::remove_dir_all(&extract_dir).map_err(|err| err.to_string())?;
+    }
+    fs::create_dir_all(&extract_dir).map_err(|err| err.to_string())?;
+    if zip_path.exists() {
+        fs::remove_file(&zip_path).map_err(|err| err.to_string())?;
+    }
+
+    let mut curl = Command::new("curl");
+    curl.args(["-fL", "--progress-bar", "-o"])
+        .arg(&zip_path)
+        .arg(&url);
+    run_command(curl, "download managed Chrome")?;
+
+    if std::env::consts::OS == "macos" {
+        let mut ditto = Command::new("ditto");
+        ditto.args(["-x", "-k"]).arg(&zip_path).arg(&extract_dir);
+        run_command(ditto, "extract managed Chrome")?;
+    } else {
+        let mut unzip = Command::new("unzip");
+        unzip
+            .args(["-q", "-o"])
+            .arg(&zip_path)
+            .arg("-d")
+            .arg(&extract_dir);
+        run_command(unzip, "extract managed Chrome")?;
+    }
+
+    let extracted_dir = extract_dir.join(format!("chrome-{platform}"));
+    if !extracted_dir.exists() {
+        return Err(format!(
+            "Downloaded Chrome archive did not contain expected folder: {}",
+            extracted_dir.display()
+        ));
+    }
+    if install_dir.exists() {
+        fs::remove_dir_all(&install_dir).map_err(|err| err.to_string())?;
+    }
+    fs::rename(&extracted_dir, &install_dir).map_err(|err| err.to_string())?;
+    let _ = fs::remove_dir_all(&extract_dir);
+    let _ = fs::remove_file(&zip_path);
+
+    let binary_path = managed_browser_binary_path(paths)?;
+    if !binary_path.exists() {
+        return Err(format!(
+            "Managed Chrome installed, but binary was not found: {}",
+            binary_path.display()
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = fs::metadata(&binary_path)
+            .map_err(|err| err.to_string())?
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&binary_path, permissions).map_err(|err| err.to_string())?;
+    }
+
+    Ok(managed_browser_status(paths))
+}
+
+fn browser_candidates(paths: Option<&AppPaths>) -> Vec<BrowserCandidate> {
+    let mut candidates = Vec::new();
+    if let Some(paths) = paths {
+        if let Ok(binary_path) = managed_browser_binary_path(paths) {
+            let install_dir = managed_browser_root(paths);
+            candidates.push(BrowserCandidate {
+                name: "FingerBrow Managed Chrome".to_string(),
+                app_path: install_dir.to_string_lossy().to_string(),
+                binary_path: binary_path.to_string_lossy().to_string(),
+                exists: binary_path.exists(),
+            });
+        }
+    }
+
+    candidates.extend(
+        [
+            (
+                "Google Chrome",
+                "/Applications/Google Chrome.app",
+                "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+            ),
+            (
+                "Chromium",
+                "/Applications/Chromium.app",
+                "/Applications/Chromium.app/Contents/MacOS/Chromium",
+            ),
+        ]
+        .into_iter()
+        .map(|(name, app_path, binary_path)| BrowserCandidate {
+            name: name.to_string(),
+            app_path: app_path.to_string(),
+            binary_path: binary_path.to_string(),
+            exists: Path::new(binary_path).exists(),
+        }),
+    );
+
+    candidates
+}
+
+fn detect_default_browser_binary(paths: &AppPaths) -> Option<String> {
+    browser_candidates(Some(paths))
         .into_iter()
         .find(|candidate| candidate.exists)
         .map(|candidate| candidate.binary_path)
@@ -1382,8 +1580,18 @@ fn get_app_paths(state: State<'_, AppState>) -> AppPaths {
 }
 
 #[tauri::command]
-fn detect_browsers() -> Vec<BrowserCandidate> {
-    browser_candidates()
+fn detect_browsers(state: State<'_, AppState>) -> Vec<BrowserCandidate> {
+    browser_candidates(Some(&state.paths))
+}
+
+#[tauri::command]
+fn get_managed_browser_status(state: State<'_, AppState>) -> ManagedBrowserStatus {
+    managed_browser_status(&state.paths)
+}
+
+#[tauri::command]
+fn install_managed_browser(state: State<'_, AppState>) -> Result<ManagedBrowserStatus, String> {
+    install_managed_browser_inner(&state.paths)
 }
 
 #[tauri::command]
@@ -1893,7 +2101,7 @@ fn launch_profile(id: String, state: State<'_, AppState>) -> Result<LaunchProfil
         .browser_binary_path
         .clone()
         .filter(|path| !path.trim().is_empty())
-        .or_else(detect_default_browser_binary)
+        .or_else(|| detect_default_browser_binary(&state.paths))
         .ok_or_else(|| {
             "No Chrome/Chromium binary found. Set a browser binary path on the profile.".to_string()
         })?;
@@ -2049,6 +2257,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_app_paths,
             detect_browsers,
+            get_managed_browser_status,
+            install_managed_browser,
             list_proxy_profiles,
             create_proxy_profile,
             update_proxy_profile,
