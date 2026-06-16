@@ -1293,11 +1293,6 @@ fn build_launch_args(profile: &Profile) -> Vec<String> {
         _ => {}
     }
 
-    if profile.webrtc_disabled && profile.webrtc_policy == "default" {
-        args.push("--webrtc-ip-handling-policy=disable_non_proxied_udp".to_string());
-        args.push("--force-webrtc-ip-handling-policy".to_string());
-    }
-
     let custom_has_proxy = profile
         .launch_args
         .iter()
@@ -1341,7 +1336,11 @@ fn build_launch_args(profile: &Profile) -> Vec<String> {
 }
 
 fn running_profile_processes(user_data_dir: &str) -> Result<Vec<RunningProfileProcess>, String> {
-    let needle = format!("--user-data-dir={user_data_dir}");
+    let stdout = process_table_output()?;
+    Ok(match_profile_processes(&stdout, user_data_dir))
+}
+
+fn process_table_output() -> Result<String, String> {
     let output = Command::new("ps")
         .args(["-axo", "pid=,command="])
         .output()
@@ -1351,8 +1350,12 @@ fn running_profile_processes(user_data_dir: &str) -> Result<Vec<RunningProfilePr
         return Err("Failed to inspect running browser processes.".to_string());
     }
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let processes = stdout
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+fn match_profile_processes(process_table: &str, user_data_dir: &str) -> Vec<RunningProfileProcess> {
+    let needle = format!("--user-data-dir={user_data_dir}");
+    process_table
         .lines()
         .filter_map(|line| {
             let trimmed = line.trim_start();
@@ -1366,9 +1369,7 @@ fn running_profile_processes(user_data_dir: &str) -> Result<Vec<RunningProfilePr
                 command: command.to_string(),
             })
         })
-        .collect();
-
-    Ok(processes)
+        .collect()
 }
 
 fn tracked_browser_pid(profile_id: &str, state: &AppState) -> Result<Option<u32>, String> {
@@ -1436,15 +1437,6 @@ fn terminate_tracked_browser_child(
     }
 
     Ok(Some(pid))
-}
-
-fn profile_is_running(profile_id: &str, user_data_dir: &str, state: &AppState) -> bool {
-    tracked_browser_pid(profile_id, state)
-        .map(|pid| pid.is_some())
-        .unwrap_or(false)
-        || running_profile_processes(user_data_dir)
-            .map(|processes| !processes.is_empty())
-            .unwrap_or(false)
 }
 
 fn terminate_profile_processes(
@@ -2024,8 +2016,15 @@ fn list_profiles(state: State<'_, AppState>) -> Result<Vec<Profile>, String> {
         .collect::<Result<Vec<_>, _>>()
         .map_err(|err| err.to_string())?;
 
+    let process_table = process_table_output().ok();
     for profile in &mut profiles {
-        profile.running = profile_is_running(&profile.id, &profile.user_data_dir, &state);
+        profile.running = tracked_browser_pid(&profile.id, &state)
+            .map(|pid| pid.is_some())
+            .unwrap_or(false)
+            || process_table
+                .as_deref()
+                .map(|table| !match_profile_processes(table, &profile.user_data_dir).is_empty())
+                .unwrap_or(false);
     }
 
     Ok(profiles)
@@ -2608,6 +2607,33 @@ mod tests {
     fn chrome_argb_color_matches_chrome_user_color_format() {
         assert_eq!(chrome_argb_color(0, 177, 255), -16_731_649);
         assert_eq!(chrome_argb_color(5, 150, 105), -16_411_031);
+    }
+
+    #[test]
+    fn writes_chrome_profile_color_preferences() {
+        let profile_root =
+            std::env::temp_dir().join(format!("fingerbrow-profile-color-test-{}", Uuid::new_v4()));
+        let user_data_dir = profile_root.join("chrome-user-data");
+        let mut profile = test_profile();
+        profile.name = "Aussie Girl".to_string();
+        profile.user_data_dir = user_data_dir.to_string_lossy().to_string();
+        profile.profile_color = Some("#059669".to_string());
+
+        ensure_chrome_profile_preferences(&profile).expect("preferences should be written");
+
+        let preferences_path = user_data_dir.join("Default").join("Preferences");
+        let preferences = fs::read_to_string(&preferences_path).expect("preferences should exist");
+        let value: Value =
+            serde_json::from_str(&preferences).expect("preferences should be valid JSON");
+
+        assert_eq!(value["profile"]["name"], "Aussie Girl");
+        assert_eq!(value["profile"]["avatar_index"], 26);
+        assert_eq!(value["extensions"]["theme"]["id"], "user_color_theme_id");
+        assert_eq!(value["browser"]["theme"]["user_color"], -16_411_031);
+        assert_eq!(value["browser"]["theme"]["user_color2"], -16_411_031);
+        assert_eq!(value["browser"]["theme"]["follows_system_colors"], false);
+
+        fs::remove_dir_all(profile_root).expect("temp profile should clean up");
     }
 
     #[test]
