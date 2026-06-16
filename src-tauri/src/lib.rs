@@ -950,7 +950,7 @@ fn apply_authenticated_proxy_relay(
         .flatten()
     };
     let secret_ref = secret_ref.ok_or_else(|| {
-        "This profile has a proxy username but no saved Keychain password.".to_string()
+        "This profile has a proxy username but no saved credential store password.".to_string()
     })?;
     let password = read_proxy_password(&secret_ref)?;
     let upstream = UpstreamProxy {

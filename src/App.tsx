@@ -638,12 +638,19 @@ function App() {
 
   async function launchProfile(profileId: string) {
     try {
+      const profile = profiles.find((profile) => profile.id === profileId);
       const result = await invoke<LaunchProfileResult>("launch_profile", { id: profileId });
       const proxyArg = result.args.find((arg) => arg.startsWith("--proxy-server="));
+      const configuredProxy =
+        profile?.proxy_scheme && profile.proxy_host && profile.proxy_port
+          ? `${profile.proxy_scheme}://${profile.proxy_host}:${profile.proxy_port}`
+          : null;
       setLaunchMessage(
-        proxyArg
-          ? `Launched profile through ${proxyArg.replace("--proxy-server=", "")}.`
-          : "Launched profile without an explicit proxy flag.",
+        configuredProxy
+          ? `Launched profile through ${configuredProxy}.`
+          : proxyArg
+            ? `Launched profile through ${proxyArg.replace("--proxy-server=", "")}.`
+            : "Launched profile without an explicit proxy flag.",
       );
       setProxyTestMessage(null);
       setError(null);
