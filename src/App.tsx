@@ -21,6 +21,7 @@ type AppPaths = {
   credentials_path: string;
   profiles_dir: string;
   backups_dir: string;
+  browsers_dir: string;
 };
 
 type Profile = {
@@ -285,7 +286,26 @@ function defaultWindowForOs(os: AppearanceOs) {
   return { width: "1280", height: "900" };
 }
 
-function parseProxyUrlParts(value: string) {
+type ParsedProxyUrl = {
+  scheme: string;
+  host: string;
+  port: string;
+  username: string;
+  password: string;
+};
+
+function normalizeProxyPort(value: string) {
+  if (!/^\d+$/.test(value)) {
+    return null;
+  }
+  const port = Number(value);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    return null;
+  }
+  return String(port);
+}
+
+function parseProxyUrlParts(value: string): ParsedProxyUrl | null {
   const trimmed = value.trim();
   if (!trimmed) {
     return null;
@@ -294,10 +314,14 @@ function parseProxyUrlParts(value: string) {
   try {
     const parsed = new URL(trimmed);
     if (parsed.hostname && parsed.port) {
+      const port = normalizeProxyPort(parsed.port);
+      if (!port) {
+        return null;
+      }
       return {
         scheme: parsed.protocol.replace(":", "") || "socks5",
         host: parsed.hostname,
-        port: parsed.port,
+        port,
         username: decodeURIComponent(parsed.username),
         password: decodeURIComponent(parsed.password),
       };
@@ -310,8 +334,9 @@ function parseProxyUrlParts(value: string) {
   const scheme = trimmed.includes("://") ? trimmed.split("://")[0].toLowerCase() : "socks5";
   const [host, port, username, ...passwordParts] = withoutScheme.split(":");
   const password = passwordParts.join(":");
-  if (host && port) {
-    return { scheme, host, port, username: username || "", password };
+  const normalizedPort = normalizeProxyPort(port ?? "");
+  if (host && normalizedPort) {
+    return { scheme, host, port: normalizedPort, username: username || "", password };
   }
 
   return null;
@@ -377,6 +402,9 @@ function App() {
   }
 
   function parseProxyUrl(value: string) {
+    if (!value.trim()) {
+      return;
+    }
     const parsed = parseProxyUrlParts(value);
     if (parsed) {
       setForm({
@@ -390,10 +418,16 @@ function App() {
         proxyPassword: parsed.password,
         proxyUrl: "",
       });
+      setError(null);
+    } else {
+      setError("Proxy URL must include a host and a numeric port between 1 and 65535.");
     }
   }
 
   function parseProxyProfileUrl(value: string) {
+    if (!value.trim()) {
+      return;
+    }
     const parsed = parseProxyUrlParts(value);
     if (parsed) {
       setProxyForm({
@@ -405,6 +439,9 @@ function App() {
         password: parsed.password,
         proxyUrl: "",
       });
+      setError(null);
+    } else {
+      setError("Proxy URL must include a host and a numeric port between 1 and 65535.");
     }
   }
 

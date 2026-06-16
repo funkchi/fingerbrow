@@ -472,16 +472,27 @@ fn save_proxy_password(profile_id: &str, username: &str, password: &str) -> Resu
 }
 
 fn delete_proxy_password(secret_ref: &str) -> Result<(), String> {
-    let status = Command::new("security")
+    let output = Command::new("security")
         .args(["delete-generic-password", "-s", secret_ref])
-        .status()
+        .output()
         .map_err(|err| format!("Failed to delete proxy password from Keychain: {err}"))?;
 
-    if status.success() {
-        Ok(())
-    } else {
-        Ok(())
+    if output.status.success() {
+        return Ok(());
     }
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if stderr.contains("could not be found")
+        || stderr.contains("The specified item could not be found")
+        || stderr.contains("-25300")
+    {
+        return Ok(());
+    }
+
+    Err(format!(
+        "Failed to delete proxy password from Keychain: {}",
+        stderr.trim()
+    ))
 }
 
 fn read_proxy_password(secret_ref: &str) -> Result<String, String> {
@@ -1741,7 +1752,16 @@ fn delete_proxy_profile(id: String, state: State<'_, AppState>) -> Result<(), St
     };
     let conn = state.db.lock().map_err(|err| err.to_string())?;
     conn.execute(
-        "UPDATE profiles SET proxy_id = NULL WHERE proxy_id = ?1",
+        r#"
+        UPDATE profiles
+        SET proxy_id = NULL,
+            proxy_scheme = NULL,
+            proxy_host = NULL,
+            proxy_port = NULL,
+            proxy_username = NULL,
+            proxy_password_secret_ref = NULL
+        WHERE proxy_id = ?1
+        "#,
         [&id],
     )
     .map_err(|err| err.to_string())?;
@@ -2148,7 +2168,7 @@ fn launch_profile(id: String, state: State<'_, AppState>) -> Result<LaunchProfil
     let launched_at = now();
     let conn = state.db.lock().map_err(|err| err.to_string())?;
     conn.execute(
-        "UPDATE profiles SET last_launched_at = ?1, updated_at = ?1 WHERE id = ?2",
+        "UPDATE profiles SET last_launched_at = ?1 WHERE id = ?2",
         params![launched_at.to_rfc3339(), id],
     )
     .map_err(|err| err.to_string())?;
