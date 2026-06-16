@@ -1,10 +1,11 @@
 use chrono::{DateTime, Utc};
+use keyring::{Entry, Error as KeyringError};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
     collections::HashMap,
-    fs,
+    env, fs,
     io::{self, BufRead, BufReader, Read, Write},
     net::{IpAddr, Shutdown, TcpListener, TcpStream},
     path::{Path, PathBuf},
@@ -450,30 +451,36 @@ fn keychain_service(profile_id: &str) -> String {
     format!("com.xiaochi.local-chromium-manager.proxy.{profile_id}")
 }
 
-fn save_proxy_password(profile_id: &str, username: &str, password: &str) -> Result<String, String> {
+const CREDENTIAL_USER: &str = "proxy-password";
+
+fn credential_entry(secret_ref: &str) -> Result<Entry, String> {
+    Entry::new(secret_ref, CREDENTIAL_USER)
+        .map_err(|err| format!("Failed to open credential store entry: {err}"))
+}
+
+fn save_proxy_password(
+    profile_id: &str,
+    _username: &str,
+    password: &str,
+) -> Result<String, String> {
     let service = keychain_service(profile_id);
-    let status = Command::new("security")
-        .args([
-            "add-generic-password",
-            "-a",
-            username,
-            "-s",
-            &service,
-            "-w",
-            password,
-            "-U",
-        ])
-        .status()
-        .map_err(|err| format!("Failed to write proxy password to Keychain: {err}"))?;
-
-    if !status.success() {
-        return Err("Failed to write proxy password to Keychain.".to_string());
-    }
-
+    credential_entry(&service)?
+        .set_password(password)
+        .map_err(|err| format!("Failed to write proxy password to credential store: {err}"))?;
     Ok(service)
 }
 
 fn delete_proxy_password(secret_ref: &str) -> Result<(), String> {
+    match credential_entry(secret_ref)?.delete_credential() {
+        Ok(()) | Err(KeyringError::NoEntry) => legacy_delete_proxy_password(secret_ref),
+        Err(err) => Err(format!(
+            "Failed to delete proxy password from credential store: {err}"
+        )),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn legacy_delete_proxy_password(secret_ref: &str) -> Result<(), String> {
     let output = Command::new("security")
         .args(["delete-generic-password", "-s", secret_ref])
         .output()
@@ -497,7 +504,23 @@ fn delete_proxy_password(secret_ref: &str) -> Result<(), String> {
     ))
 }
 
+#[cfg(not(target_os = "macos"))]
+fn legacy_delete_proxy_password(_secret_ref: &str) -> Result<(), String> {
+    Ok(())
+}
+
 fn read_proxy_password(secret_ref: &str) -> Result<String, String> {
+    match credential_entry(secret_ref)?.get_password() {
+        Ok(password) => Ok(password),
+        Err(KeyringError::NoEntry) => legacy_read_proxy_password(secret_ref),
+        Err(err) => Err(format!(
+            "Failed to read proxy password from credential store: {err}"
+        )),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn legacy_read_proxy_password(secret_ref: &str) -> Result<String, String> {
     let output = Command::new("security")
         .args(["find-generic-password", "-s", secret_ref, "-w"])
         .output()
@@ -510,6 +533,11 @@ fn read_proxy_password(secret_ref: &str) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&output.stdout)
         .trim_end()
         .to_string())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn legacy_read_proxy_password(_secret_ref: &str) -> Result<String, String> {
+    Err("No saved proxy password was found in the credential store.".to_string())
 }
 
 #[derive(Clone, Debug)]
@@ -1105,29 +1133,94 @@ fn browser_candidates(paths: Option<&AppPaths>) -> Vec<BrowserCandidate> {
         }
     }
 
-    candidates.extend(
-        [
-            (
-                "Google Chrome",
-                "/Applications/Google Chrome.app",
-                "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-            ),
-            (
-                "Chromium",
-                "/Applications/Chromium.app",
-                "/Applications/Chromium.app/Contents/MacOS/Chromium",
-            ),
-        ]
-        .into_iter()
-        .map(|(name, app_path, binary_path)| BrowserCandidate {
-            name: name.to_string(),
-            app_path: app_path.to_string(),
-            binary_path: binary_path.to_string(),
-            exists: Path::new(binary_path).exists(),
-        }),
-    );
+    candidates.extend(platform_browser_candidates());
 
     candidates
+}
+
+fn browser_candidate(name: &str, app_path: &str, binary_path: &str) -> BrowserCandidate {
+    BrowserCandidate {
+        name: name.to_string(),
+        app_path: app_path.to_string(),
+        binary_path: binary_path.to_string(),
+        exists: Path::new(binary_path).exists(),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn platform_browser_candidates() -> Vec<BrowserCandidate> {
+    [
+        (
+            "Google Chrome",
+            "/Applications/Google Chrome.app",
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        ),
+        (
+            "Chromium",
+            "/Applications/Chromium.app",
+            "/Applications/Chromium.app/Contents/MacOS/Chromium",
+        ),
+    ]
+    .into_iter()
+    .map(|(name, app_path, binary_path)| browser_candidate(name, app_path, binary_path))
+    .collect()
+}
+
+#[cfg(target_os = "linux")]
+fn platform_browser_candidates() -> Vec<BrowserCandidate> {
+    let mut candidates = vec![
+        browser_candidate(
+            "Google Chrome",
+            "/usr/bin/google-chrome",
+            "/usr/bin/google-chrome",
+        ),
+        browser_candidate(
+            "Google Chrome Stable",
+            "/usr/bin/google-chrome-stable",
+            "/usr/bin/google-chrome-stable",
+        ),
+        browser_candidate("Chromium", "/usr/bin/chromium", "/usr/bin/chromium"),
+        browser_candidate(
+            "Chromium Browser",
+            "/usr/bin/chromium-browser",
+            "/usr/bin/chromium-browser",
+        ),
+    ];
+
+    for (name, command) in [
+        ("Google Chrome", "google-chrome"),
+        ("Google Chrome Stable", "google-chrome-stable"),
+        ("Chromium", "chromium"),
+        ("Chromium Browser", "chromium-browser"),
+    ] {
+        if candidates.iter().any(|candidate| {
+            candidate.exists
+                && Path::new(&candidate.binary_path)
+                    .file_name()
+                    .is_some_and(|file_name| file_name.to_string_lossy() == command)
+        }) {
+            continue;
+        }
+        if let Some(binary_path) = find_in_path(command) {
+            let binary_path = binary_path.to_string_lossy().to_string();
+            candidates.push(browser_candidate(name, &binary_path, &binary_path));
+        }
+    }
+
+    candidates
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn platform_browser_candidates() -> Vec<BrowserCandidate> {
+    Vec::new()
+}
+
+#[cfg(target_os = "linux")]
+fn find_in_path(command: &str) -> Option<PathBuf> {
+    let path = env::var_os("PATH")?;
+    env::split_paths(&path)
+        .map(|dir| dir.join(command))
+        .find(|path| path.is_file())
 }
 
 fn detect_default_browser_binary(paths: &AppPaths) -> Option<String> {
@@ -1260,9 +1353,7 @@ fn tracked_browser_pid(profile_id: &str, state: &AppState) -> Result<Option<u32>
     let pid = match children.get_mut(profile_id) {
         Some(child) => match child.try_wait() {
             Ok(Some(status)) => {
-                eprintln!(
-                    "tracked_browser_pid: profile {profile_id} child exited with {status}"
-                );
+                eprintln!("tracked_browser_pid: profile {profile_id} child exited with {status}");
                 should_remove = true;
                 None
             }
