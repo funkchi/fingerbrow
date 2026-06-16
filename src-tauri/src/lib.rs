@@ -3,11 +3,12 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
+    collections::HashMap,
     fs,
     io::{self, BufRead, BufReader, Read, Write},
     net::{IpAddr, Shutdown, TcpListener, TcpStream},
     path::{Path, PathBuf},
-    process::Command,
+    process::{Child, Command},
     sync::Mutex,
     thread,
     time::Duration,
@@ -51,6 +52,7 @@ impl AppPaths {
 struct AppState {
     paths: AppPaths,
     db: Mutex<Connection>,
+    browser_children: Mutex<HashMap<String, Child>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1249,10 +1251,102 @@ fn running_profile_processes(user_data_dir: &str) -> Result<Vec<RunningProfilePr
     Ok(processes)
 }
 
-fn terminate_profile_processes(user_data_dir: &str) -> Result<Vec<u32>, String> {
+fn tracked_browser_pid(profile_id: &str, state: &AppState) -> Result<Option<u32>, String> {
+    let mut children = state
+        .browser_children
+        .lock()
+        .map_err(|err| err.to_string())?;
+    let mut should_remove = false;
+    let pid = match children.get_mut(profile_id) {
+        Some(child) => match child.try_wait() {
+            Ok(Some(status)) => {
+                eprintln!(
+                    "tracked_browser_pid: profile {profile_id} child exited with {status}"
+                );
+                should_remove = true;
+                None
+            }
+            Ok(None) => Some(child.id()),
+            Err(err) => {
+                eprintln!(
+                    "tracked_browser_pid: failed to inspect profile {profile_id} child: {err}"
+                );
+                should_remove = true;
+                None
+            }
+        },
+        None => None,
+    };
+    if should_remove {
+        children.remove(profile_id);
+    }
+    Ok(pid)
+}
+
+fn terminate_tracked_browser_child(
+    profile_id: &str,
+    state: &AppState,
+) -> Result<Option<u32>, String> {
+    let mut child = state
+        .browser_children
+        .lock()
+        .map_err(|err| err.to_string())?
+        .remove(profile_id);
+
+    let Some(mut child) = child.take() else {
+        return Ok(None);
+    };
+
+    let pid = child.id();
+    match child.try_wait() {
+        Ok(Some(status)) => {
+            eprintln!("close_profile: tracked browser process {pid} already exited with {status}");
+        }
+        Ok(None) => {
+            child
+                .kill()
+                .map_err(|err| format!("Failed to kill tracked browser process {pid}: {err}"))?;
+            child
+                .wait()
+                .map_err(|err| format!("Failed to reap tracked browser process {pid}: {err}"))?;
+        }
+        Err(err) => {
+            return Err(format!(
+                "Failed to inspect tracked browser process {pid}: {err}"
+            ));
+        }
+    }
+
+    Ok(Some(pid))
+}
+
+fn profile_is_running(profile_id: &str, user_data_dir: &str, state: &AppState) -> bool {
+    tracked_browser_pid(profile_id, state)
+        .map(|pid| pid.is_some())
+        .unwrap_or(false)
+        || running_profile_processes(user_data_dir)
+            .map(|processes| !processes.is_empty())
+            .unwrap_or(false)
+}
+
+fn terminate_profile_processes(
+    profile_id: &str,
+    user_data_dir: &str,
+    state: &AppState,
+) -> Result<Vec<u32>, String> {
+    let mut pids = Vec::new();
+    if let Some(pid) = terminate_tracked_browser_child(profile_id, state)? {
+        pids.push(pid);
+    }
+
     let processes = running_profile_processes(user_data_dir)?;
-    let pids: Vec<u32> = processes.into_iter().map(|process| process.pid).collect();
-    for pid in &pids {
+    let fallback_pids: Vec<u32> = processes
+        .into_iter()
+        .map(|process| process.pid)
+        .filter(|pid| !pids.contains(pid))
+        .collect();
+
+    for pid in &fallback_pids {
         let status = Command::new("kill")
             .args(["-TERM", &pid.to_string()])
             .status()
@@ -1262,7 +1356,7 @@ fn terminate_profile_processes(user_data_dir: &str) -> Result<Vec<u32>, String> 
         }
     }
 
-    if !pids.is_empty() {
+    if !fallback_pids.is_empty() {
         thread::sleep(Duration::from_millis(800));
     }
 
@@ -1276,6 +1370,15 @@ fn terminate_profile_processes(user_data_dir: &str) -> Result<Vec<u32>, String> 
             .map_err(|err| format!("Failed to kill browser process {pid}: {err}"))?;
         if !status.success() {
             eprintln!("close_profile: process {pid} did not accept SIGKILL");
+        }
+        if !pids.contains(&pid) {
+            pids.push(pid);
+        }
+    }
+
+    for pid in fallback_pids {
+        if !pids.contains(&pid) {
+            pids.push(pid);
         }
     }
 
@@ -1582,6 +1685,7 @@ fn init_state(app_data_dir: PathBuf) -> Result<AppState, String> {
     Ok(AppState {
         paths,
         db: Mutex::new(conn),
+        browser_children: Mutex::new(HashMap::new()),
     })
 }
 
@@ -1803,9 +1907,7 @@ fn list_profiles(state: State<'_, AppState>) -> Result<Vec<Profile>, String> {
         .map_err(|err| err.to_string())?;
 
     for profile in &mut profiles {
-        profile.running = running_profile_processes(&profile.user_data_dir)
-            .map(|processes| !processes.is_empty())
-            .unwrap_or(false);
+        profile.running = profile_is_running(&profile.id, &profile.user_data_dir, &state);
     }
 
     Ok(profiles)
@@ -2132,6 +2234,12 @@ fn launch_profile(id: String, state: State<'_, AppState>) -> Result<LaunchProfil
         ));
     }
 
+    if let Some(pid) = tracked_browser_pid(&id, &state)? {
+        return Err(format!(
+            "This profile is already running in Chrome process {pid}. Close that profile window and launch again so the latest proxy and browser flags can apply."
+        ));
+    }
+
     let running_pids: Vec<u32> = running_profile_processes(&profile.user_data_dir)?
         .into_iter()
         .map(|process| process.pid)
@@ -2161,9 +2269,30 @@ fn launch_profile(id: String, state: State<'_, AppState>) -> Result<LaunchProfil
         command.env("TZ", timezone);
         eprintln!("launch_profile timezone: {timezone}");
     }
-    command
+    let mut child = command
         .spawn()
         .map_err(|err| format!("Failed to launch browser: {err}"))?;
+    let child_pid = child.id();
+    thread::sleep(Duration::from_millis(350));
+    match child.try_wait() {
+        Ok(Some(status)) => {
+            return Err(format!(
+                "Browser process {child_pid} exited immediately after launch with {status}."
+            ));
+        }
+        Ok(None) => {
+            state
+                .browser_children
+                .lock()
+                .map_err(|err| err.to_string())?
+                .insert(id.clone(), child);
+        }
+        Err(err) => {
+            return Err(format!(
+                "Failed to inspect launched browser process {child_pid}: {err}"
+            ));
+        }
+    }
 
     let launched_at = now();
     let conn = state.db.lock().map_err(|err| err.to_string())?;
@@ -2183,8 +2312,8 @@ fn launch_profile(id: String, state: State<'_, AppState>) -> Result<LaunchProfil
 
 #[tauri::command]
 fn close_profile(id: String, state: State<'_, AppState>) -> Result<Vec<u32>, String> {
-    let profile = get_profile(&id, state)?;
-    terminate_profile_processes(&profile.user_data_dir)
+    let profile = get_profile(&id, state.clone())?;
+    terminate_profile_processes(&id, &profile.user_data_dir, &state)
 }
 
 #[tauri::command]
