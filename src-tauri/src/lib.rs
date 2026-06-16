@@ -678,6 +678,33 @@ fn http_response_body(response: &str) -> String {
     body.to_string()
 }
 
+fn http_status_code(response: &str) -> Option<u16> {
+    response
+        .lines()
+        .next()?
+        .split_whitespace()
+        .nth(1)?
+        .parse::<u16>()
+        .ok()
+}
+
+fn read_http_response(stream: &mut TcpStream) -> Result<String, String> {
+    let mut response = Vec::new();
+    stream
+        .read_to_end(&mut response)
+        .map_err(|err| format!("Failed to read proxy test response: {err}"))?;
+    Ok(String::from_utf8_lossy(&response).to_string())
+}
+
+fn send_proxy_test_request(stream: &mut TcpStream, request_target: &str) -> Result<(), String> {
+    let request = format!(
+        "GET {request_target} HTTP/1.1\r\nHost: api.ipify.org\r\nAccept: application/json, text/plain;q=0.9, */*;q=0.1\r\nAccept-Encoding: identity\r\nConnection: close\r\n\r\n"
+    );
+    stream
+        .write_all(request.as_bytes())
+        .map_err(|err| format!("Failed to send proxy test request: {err}"))
+}
+
 fn decode_chunked_body(body: &str) -> Result<String, String> {
     let mut rest = body.as_bytes();
     let mut decoded = Vec::new();
@@ -2426,40 +2453,61 @@ fn test_profile_proxy(id: String, state: State<'_, AppState>) -> Result<ProxyTes
         }
     };
 
-    if scheme != "http" {
-        return Ok(ProxyTestResult {
-            ok: false,
-            message: "Proxy test currently uses the local HTTP relay path.".to_string(),
-            observed_ip: None,
-        });
-    }
-
-    let mut stream = TcpStream::connect(format!("{host}:{port}"))
-        .map_err(|err| format!("Failed to connect to local proxy relay: {err}"))?;
+    let mut stream = match scheme {
+        "http" => TcpStream::connect(format!("{host}:{port}"))
+            .map_err(|err| format!("Failed to connect to HTTP proxy: {err}"))?,
+        "socks5" => connect_via_socks5(
+            &UpstreamProxy {
+                scheme: scheme.to_string(),
+                host: host.to_string(),
+                port: u16::try_from(port)
+                    .map_err(|_| format!("Proxy port is outside the valid range: {port}"))?,
+                username: None,
+                password: None,
+            },
+            "api.ipify.org",
+            80,
+        )?,
+        unsupported => {
+            return Ok(ProxyTestResult {
+                ok: false,
+                message: format!("Proxy test does not support direct {unsupported} proxies yet."),
+                observed_ip: None,
+            });
+        }
+    };
     stream
         .set_read_timeout(Some(Duration::from_secs(30)))
         .map_err(|err| err.to_string())?;
     stream
         .set_write_timeout(Some(Duration::from_secs(30)))
         .map_err(|err| err.to_string())?;
-    stream
-        .write_all(
-            b"GET http://api.ipify.org/?format=json HTTP/1.1\r\nHost: api.ipify.org\r\nConnection: close\r\n\r\n",
-        )
-        .map_err(|err| format!("Failed to send proxy test request: {err}"))?;
 
-    let mut response = String::new();
-    stream
-        .read_to_string(&mut response)
-        .map_err(|err| format!("Failed to read proxy test response: {err}"))?;
+    let request_target = if scheme == "http" {
+        "http://api.ipify.org/?format=json"
+    } else {
+        "/?format=json"
+    };
+    send_proxy_test_request(&mut stream, request_target)?;
+
+    let response = read_http_response(&mut stream)?;
     let body = http_response_body(&response);
     let observed_ip = extract_ip_from_body(&body);
+    let status_code = http_status_code(&response);
+    let ok = status_code.is_some_and(|code| (200..300).contains(&code)) && observed_ip.is_some();
 
     Ok(ProxyTestResult {
-        ok: response.starts_with("HTTP/1.1 200") || response.starts_with("HTTP/1.0 200"),
+        ok,
         message: relay_port
             .map(|port| format!("Proxy test used local relay 127.0.0.1:{port}."))
-            .unwrap_or_else(|| "Proxy test used configured proxy directly.".to_string()),
+            .unwrap_or_else(|| {
+                format!(
+                    "Proxy test used configured {scheme} proxy directly{}.",
+                    status_code
+                        .map(|code| format!("; HTTP status {code}"))
+                        .unwrap_or_default()
+                )
+            }),
         observed_ip,
     })
 }
